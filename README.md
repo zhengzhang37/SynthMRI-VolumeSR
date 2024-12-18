@@ -1,7 +1,7 @@
 # SynthMRI-VolumeSR
 
 This project aims to achieve multi-contrast volume super-resolution for LR FLAIR and HR TOF to generate HR-like FLAIR volume.
-
+![image](https://github.com/zhengzhang37/SynthMRI-VolumeSR/blob/main/results.jpg)
 ## Train
 
 ## Inference
