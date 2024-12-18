@@ -22,5 +22,11 @@ Inference code of multi-contrast volume super-resolution for LR FLAIR + HR TOF -
 python inference.py
 ```
 
+## Transform Nii volume to Dicom Files
+
+```
+nii2dcm(nii_image_path='your_nii_image', version='save_name', root_path='reference_dcm_file_path', save_path='your_save_path')
+```
+
 ## Pre-trained model
 The model can be downloaded [here](https://drive.google.com/file/d/1MIv3F7bpDnw27ya-pgcFKTTWX9PX23xs/view?usp=sharing).
