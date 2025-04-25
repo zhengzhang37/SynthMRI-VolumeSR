@@ -6,7 +6,7 @@ This project aims to achieve multi-contrast volume super-resolution for LR FLAIR
 ## Data Preparation
 
 ### Acquired Information
-478 subjects with acquired 2D FLAIR, HR 3D FLAIR and 3D TOF images
+480 subjects with acquired 2D FLAIR, HR 3D FLAIR and 3D TOF images
 ![image](https://github.com/zhengzhang37/SynthMRI-VolumeSR/blob/main/contrast.jpg)
 
 3D TOF images were used as the reference to provide structural details and align the number of slices from other contrast 3D scans during cross-contrast registration. During data pre-processing, 2D images were linearly interpolated to match the slice number as its corresponding 3D acquisition but still in LR, while the 3D acquisitions served as HR targets.
