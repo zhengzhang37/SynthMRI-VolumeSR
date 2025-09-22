@@ -7,7 +7,7 @@ This project aims to achieve multi-contrast volume super-resolution for LR FLAIR
 
 ### Acquired Information
 480 subjects with acquired 2D FLAIR, HR 3D FLAIR and 3D T1 images
-![image](https://github.com/zhengzhang37/SynthMRI-VolumeSR/blob/main/contrast.jpg)
+![image](https://github.com/zhengzhang37/SynthMRI-VolumeSR/blob/main/contrast.png)
 
 3D T1 images were used as the reference to provide structural details and align the number of slices from other contrast 3D scans during cross-contrast registration. During data pre-processing, 2D images were linearly interpolated to match the slice number as its corresponding 3D acquisition but still in LR, while the 3D acquisitions served as HR targets.
 
