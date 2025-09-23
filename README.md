@@ -37,3 +37,15 @@ nii2dcm(nii_image_path='your_nii_image', version='save_name', root_path='referen
 
 ## Pre-trained model
 The model can be downloaded [here](https://drive.google.com/file/d/1MIv3F7bpDnw27ya-pgcFKTTWX9PX23xs/view?usp=sharing).
+
+## Requirements
+
+```
+python      3.10.15
+torchvision 0.20.1
+torch       2.5.1
+pydicom     3.0.1
+simpleitk   2.4.0
+antspyx     0.6.1
+```
+
