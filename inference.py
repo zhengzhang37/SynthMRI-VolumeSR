@@ -63,7 +63,7 @@ def inference():
     model.eval()
 
     # replace file path with your own
-    sample_path = '/home/zhangzheng/work/SynthMRI-VolumeSR/test_case'
+    sample_path = 'SynthMRI-VolumeSR/test_case'
     matrix = {
         'FLAIR': {'PSNR': 0, 'SSIM': 0}
         }
@@ -100,8 +100,8 @@ def inference():
         output[output>1.0] = 1.0
         target_image = target_image.detach().cpu().numpy()
 
-        # output = sitk.GetImageFromArray(np.array(output[0, 0,:d,:h,:w] * 0.5 + 0.5) * max_flair_lr.numpy())
-        # sitk.WriteImage(output, os.path.join(save_path, input_file))
+        # output = sitk.GetImageFromArray(np.array(output[0, 0,:d,:h,:w] * 0.5 + 0.5) * max_flair_lr)
+        # sitk.WriteImage(output, os.path.join(save_path, save_name))
         matrix['FLAIR']['PSNR'] = compare_psnr(output[0,0,:d,:h,:w], target_image[0][0], data_range=2.)
         matrix['FLAIR']['SSIM'] = compare_ssim(output[0,0,:d,:h,:w], target_image[0][0], data_range=2.)
 
