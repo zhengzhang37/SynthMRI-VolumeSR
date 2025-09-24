@@ -36,7 +36,7 @@ nii2dcm(nii_image_path='your_nii_image', version='save_name', root_path='referen
 ```
 
 ## Pre-trained model
-The model and one test case can be downloaded [here]([https://drive.google.com/file/d/1MIv3F7bpDnw27ya-pgcFKTTWX9PX23xs/view?usp=sharing](https://drive.google.com/drive/folders/1j5bC0LtaXrmv3_pARUgCL7sRCm3u_PdA?usp=sharing)).
+The model and one test case can be downloaded [here](https://drive.google.com/drive/folders/1j5bC0LtaXrmv3_pARUgCL7sRCm3u_PdA?usp=sharing).
 
 
 
