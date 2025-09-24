@@ -49,5 +49,6 @@ torch       2.5.1
 pydicom     3.0.1
 simpleitk   2.4.0
 antspyx     0.6.1
+torch-dwt   1.0.0
 ```
 
