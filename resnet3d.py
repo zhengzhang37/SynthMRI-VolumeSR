@@ -7,80 +7,230 @@ import numpy as np
 from torchinfo import summary
 from thop import profile
 import psutil
+import os
+import time
+from torch_dwt.functional import dwt3
 
-class ResidualBlock(nn.Module):
-    def __init__(self, in_features):
-        super(ResidualBlock, self).__init__()
-        # here we are not writing self.in_features = in_features because were are not going to use in_features in any
-        # other function definition other than __init__
-        conv_block = [nn.ReplicationPad3d(1),    # nn.ReflectionPad2d(1),
-                      spectral_norm(nn.Conv3d(in_features, in_features, 3)),
-                      nn.InstanceNorm3d(in_features),
-                      nn.ReLU(inplace=True),
-                      nn.ReplicationPad3d(1),    # nn.ReflectionPad2d(1),
-                      spectral_norm(nn.Conv3d(in_features, in_features, 3)),
-                      nn.InstanceNorm3d(in_features)]
+class MultiscaleSimAM(nn.Module):
+    def __init__(self, channels=None, e_lambda=1e-4):
+        super(MultiscaleSimAM, self).__init__()
 
-        self.conv_block = nn.Sequential(*conv_block)
+        self.activation = nn.Sigmoid()
+        self.e_lambda = e_lambda
+
+        # Multi-scale convolution layers
+        self.multi_scale = nn.ModuleList([
+            nn.Conv3d(channels, channels // 16, kernel_size=k, padding=k//2)
+            for k in [3, 5, 7]
+        ])
+        
+        self.fc = nn.Conv3d(channels // 16 * len(self.multi_scale), channels, kernel_size=1)
+
+    def __repr__(self):
+        s = self.__class__.__name__ + '('
+        s += ('lambda=%f)' % self.e_lambda)
+        return s
+
+    @staticmethod
+    def get_module_name():
+        return "simam_3d"
 
     def forward(self, x):
-        return x + self.conv_block(x)
+        b, c, d, h, w = x.size()  # batch, channels, depth, height, width
+        
+        n = d * h * w - 1  # Total number of voxels minus 1
+
+        # Compute mean across spatial dimensions
+        x_mean = x.mean(dim=[2, 3, 4], keepdim=True)
+        
+        # Compute variance
+        x_minus_mu_square = (x - x_mean).pow(2)
+        normalization_term = x_minus_mu_square.sum(dim=[2, 3, 4], keepdim=True) / n + self.e_lambda
+        
+        # SimAM attention weights
+        simam_attention = x_minus_mu_square / (4 * normalization_term) + 0.5
+        simam_attention = self.activation(simam_attention)
+
+        # Multi-scale feature extraction
+        pooled = nn.AdaptiveAvgPool3d(1)(x)  # Global average pooling
+        ms_features = torch.cat([conv(pooled) for conv in self.multi_scale], dim=1)
+
+        # Fully connected layer to integrate multi-scale features
+        ms_attention = self.fc(ms_features)
+        ms_attention = self.activation(ms_attention)
+
+        # Combine SimAM attention and multi-scale attention
+        combined_attention = simam_attention * ms_attention
+        return x * combined_attention
+
+class DWT(nn.Module):
+    def __init__(self):
+        super(DWT,self).__init__()
+        self.required_grad = False
+    def forward(self,x):
+        return dwt3(x,"haar").view(x.shape[0], -1, x.shape[2]//2, x.shape[3]//2, x.shape[4]//2)
+    
+class DWT_transform(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.dwt = DWT()
+        self.conv1x1_low = nn.Conv3d(in_channels, out_channels, kernel_size=1, padding=0)
+        self.conv1x1_high = nn.Conv3d(in_channels*7, out_channels, kernel_size=1, padding=0)
+        self.in_channels = in_channels
+    
+    def forward(self,x):
+        dwt_low_freq, dwt_high_freq = self.dwt(x)[:, :self.in_channels, :, :, :], self.dwt(x)[:, self.in_channels:, :, :,:]
+        assert dwt_low_freq.ndim == 5, "5-D tensor!"
+        assert dwt_high_freq.ndim == 5, "5-D tensor!"
+        dwt_low_freq = self.conv1x1_low(dwt_low_freq)
+        dwt_high_freq = self.conv1x1_high(dwt_high_freq)
+        return dwt_low_freq, dwt_high_freq
+    
+
+class ResidualBlockWithAttention(nn.Module):
+    def __init__(self, in_features):
+        super().__init__()
+        self.conv_block = nn.Sequential(
+            nn.ReplicationPad3d(1),
+            nn.Conv3d(in_features, in_features, kernel_size=3),
+            nn.GroupNorm(8, in_features),
+            nn.ReLU(inplace=True),
+            nn.ReplicationPad3d(1),
+            nn.Conv3d(in_features, in_features, kernel_size=3),
+            nn.GroupNorm(8, in_features),
+        )
+        self.se_block = nn.Sequential(
+            nn.AdaptiveAvgPool3d(1),
+            nn.Conv3d(in_features, in_features // 16, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(in_features // 16, in_features, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        residual = x
+        out = self.conv_block(x)
+        se_weight = self.se_block(out)
+        return residual + out * se_weight
+
+class Fusion(nn.Module):
+    def __init__(self, in_features):
+        super(Fusion, self).__init__()
+        self.fusion_conv = nn.Conv3d(in_features * 2, in_features, kernel_size=3, padding=1)
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool3d(1),
+            nn.Conv3d(in_features, in_features // 16, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(in_features // 16, in_features, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, flair, tof):
+        """
+        Args:
+            flair: LR FLAIR 特征 (B, C, D, H, W).
+            tof: HR TOF 特征 (B, C, D, H, W).
+        Returns:
+            融合后的特征.
+        """
+        fused = self.fusion_conv(torch.cat([flair, tof], dim=1))
+        attention = self.channel_attention(fused)
+        return fused * attention
 
 
+class ResNet3D(nn.Module):
+    def __init__(self, input_nc=1, output_nc=1, in_features=64, num_residual_blocks=6):
+        super(ResNet3D, self).__init__()
 
-class ResnetGenerator3DwithSpectralNorm(nn.Module):
+        # Initial convolution blocks
+        self.flair_encoder = nn.Sequential(
+            nn.Conv3d(input_nc, in_features, kernel_size=7, padding=3),
+            nn.GroupNorm(8, in_features),
+            nn.ReLU(inplace=True)
+        )
+        self.tof_encoder = nn.Sequential(
+            nn.Conv3d(input_nc, in_features, kernel_size=7, padding=3),
+            nn.GroupNorm(8, in_features),
+            nn.ReLU(inplace=True)
+        )
 
-    # The paper mentions: "We use 6 residual blocks for 128 × 128 training images, and 9 residual blocks for
-    # 256 × 256 or higher-resolution training images."
-
-    def __init__(self, input_nc=2, output_nc=1, num_residual_blocks=9):
-        super(ResnetGenerator3DwithSpectralNorm, self).__init__()
-
-        # Initial convolution block for the input
-        model = [nn.ReplicationPad3d(3),    # nn.ReflectionPad2d(3),
-                 spectral_norm(nn.Conv3d(input_nc, 64, 7)),
-                 nn.InstanceNorm3d(64),
-                 nn.ReLU(inplace=True)]
+        # Fusion Module
+        self.fusion = Fusion(in_features)
 
         # Downsampling
-        in_features = 64
-        out_features = in_features * 2
+        self.downsampling1 = nn.Sequential(
+            nn.Conv3d(in_features, in_features * 2 - 8, 3, stride=2, padding=1),
+            nn.GroupNorm(4, in_features * 2 - 8),
+            nn.ReLU(inplace=True),
+            MultiscaleSimAM(in_features * 2 - 8),
+        )
+        self.dwt1 = DWT_transform(in_features, 8)
 
-        for i in range(2):
-            model += [spectral_norm(nn.Conv3d(in_features, out_features, 3, stride=2, padding=1)),
-                      nn.InstanceNorm3d(out_features),
-                      nn.ReLU(inplace=True)]
-            in_features = out_features
-            out_features = in_features * 2
+        self.downsampling2 = nn.Sequential(
+            nn.Conv3d(in_features * 2, in_features * 4 - 16, 3, stride=2, padding=1),
+            nn.GroupNorm(8, in_features * 4 - 16),
+            nn.ReLU(inplace=True),
+            MultiscaleSimAM(in_features * 4 - 16),
+        )
+        self.dwt2 = DWT_transform(in_features*2, 16)
 
-        # Concatenating the Residual Blocks
-        for i in range(num_residual_blocks):
-            model += [ResidualBlock(in_features)]
+        # Bottleneck
+        self.bottleneck = nn.Sequential(*[ResidualBlockWithAttention(in_features * 4) for _ in range(num_residual_blocks)])
 
         # Upsampling
-        out_features = in_features // 2
-        for i in range(2):
+        self.upsampling1 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Conv3d(in_features * 8 + 16, in_features * 2, 3, padding=1),
+            nn.GroupNorm(8, in_features * 2),
+            nn.ReLU(inplace=True),
+            MultiscaleSimAM(in_features * 2),
+        )
 
-            model += [nn.Upsample(scale_factor=2, mode='nearest'),
-                      nn.ReplicationPad3d(1),   # nn.ReflectionPad2d(1),
-                      spectral_norm(nn.Conv3d(in_features, out_features, kernel_size=3, stride=1, padding=0)),
-                      nn.InstanceNorm3d(out_features),
-                      nn.ReLU(inplace=True) ]
-            in_features=out_features
-            out_features=in_features//2
+        self.upsampling2 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            nn.Conv3d(in_features * 4 + 8, in_features * 1, 3, padding=1),
+            nn.GroupNorm(8, in_features * 1),
+            nn.ReLU(inplace=True),
+            MultiscaleSimAM(in_features * 1)
+        )
 
-        # the final Output layer
-        model += [nn.ReplicationPad3d(3), # nn.ReflectionPad2d(3),
-                  spectral_norm(nn.Conv3d(64, output_nc, 7)),
-                  nn.Tanh()]
-
-        self.model = nn.Sequential(*model)
+        # Final output
+        self.final_conv = nn.Sequential(
+            nn.Conv3d(in_features * 1, output_nc, kernel_size=7, padding=3),
+            nn.Tanh()
+        )
 
     def forward(self, x):
-        "Standard forward function"
-        return self.model(x)
+        lr_flair = x[:, 0, :, :, :][:, None, ...]
+        hr_tof = x[:, 1, :, :, :][:, None, ...]
+        flair_features = self.flair_encoder(lr_flair) # (B, C, D, H, W)
+        tof_features = self.tof_encoder(hr_tof) # (B, C, D, H, W)
 
-class PatchGANDiscriminatorwithSpectralNorm(nn.Module):
+        # Fusion
+        fused_features = self.fusion(flair_features, tof_features) # (B, C, D, H, W)
+        
+        d1 = self.downsampling1(fused_features) # (B, 2C, D/2, H/2, W/2)
+
+        d1_low, d1_high = self.dwt1(fused_features) # (B, C, D/2, H/2, W/2), (B, 7C, D/2, H/2, W/2)
+        d1_fused = torch.cat([d1, d1_low], dim=1) # (B, 8C, D/2, H/2, W/2)
+        
+        d2 = self.downsampling2(d1_fused)  # (B, 4C, D/4, H/4, W/4)
+        d2_low, d2_high = self.dwt2(d1_fused) # (B, 2C, D/4, H/4, W/4), (B, 14C, D/4, H/4, W/4)
+        d2_fused = torch.cat([d2, d2_low], dim=1) # (B, 16C, D/4, H/4, W/4)
+        
+        # Bottleneck
+        d3 = self.bottleneck(d2_fused) # (B, 4C, D/4, H/4, W/4)
+
+        # Upsampling: Concatenate or combine high-frequency features
+        u2 = self.upsampling1(torch.cat([d3, d2_fused, d2_high], dim=1)) # (B, 128, D/2, H/2, W/2)
+        u1 = self.upsampling2(torch.cat([u2, d1_fused, d1_high], dim=1)) # (B, 64, D, H, W)
+
+        output = self.final_conv(u1)
+
+        return output
+
+
+class Discriminator(nn.Module):
 
     # The paper mentions: "For discriminator networks, we use 70 × 70 PatchGAN [22]. Let Ck denote a  4 × 4
     # Convolution-InstanceNorm-LeakyReLU layer with k filters and stride 2. After the last layer, we apply a
@@ -88,7 +238,7 @@ class PatchGANDiscriminatorwithSpectralNorm(nn.Module):
     # ReLUs with a slope of 0.2. The discriminator architecture is: C64-C128-C256-C512"
 
     def __init__(self, input_nc=1):
-        super(PatchGANDiscriminatorwithSpectralNorm, self).__init__()
+        super(Discriminator, self).__init__()
 
         model = [spectral_norm(nn.Conv3d(input_nc, 64, 4, stride=2, padding=1)),
                  nn.LeakyReLU(0.2, inplace=True)]
@@ -107,39 +257,15 @@ class PatchGANDiscriminatorwithSpectralNorm(nn.Module):
         x = F.avg_pool3d(x, x.size()[2:]).view(x.size()[0])
         return x
 
-if __name__ == "__main__":
-    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    image_size = 128
-    # x = torch.Tensor(1, 2, image_size, image_size, image_size)
-    # x.to(device)
-    # print("x size: {}".format(x.size()))
-    # process = psutil.Process()
-    # before = process.memory_info().rss / (1024 * 1024)
-    # initial_mem = torch.cuda.memory_allocated()
-    model = ResnetGenerator3DwithSpectralNorm(input_nc=2, output_nc=1).cuda()
-    model.eval()
-    input = torch.rand(1, 2, 219, 320, 290).cuda()
-    with torch.no_grad():
-        output = model(input)
-    print(output.shape)
-    # input = torch.rand(1, 2, 219, 320, 290)
-    # 监控显存使用
-    # with torch.no_grad():
-    #     output = model(input)  # 执行推理
-    # final_mem = torch.cuda.memory_allocated()
 
-    # print(f"显存使用增加了 {(final_mem - initial_mem) / 1024**2} MB")
-    # with torch.no_grad():  # 确保不计算梯度
-    #     output = model(input)
-
-    # after = process.memory_info().rss / (1024 * 1024)  # 再次获取内存使用信息
-    # print(f"Memory used: {after - before} MB")
-    # # output = model(input)
-    # model_info = summary(model, input_size=input.size(), verbose=0)
-    # print(model_info)
-    # flops, params = profile(model, inputs=(input, ))
-    # print(f"Total FLOPs: {str(flops/1000**3)}G")
-    # print(f"Total Params: {str(params/1000**3)}G")
-    # print(f"Total FLOPs: {model_info.total_flops}")
-    # out = model(x)
-    # print("out size: {}".format(out.size()))
+if __name__ == '__main__':
+    # discriminator = Discriminator(input_nc=1, num_scales=3)
+    generator = ResNet3D(input_nc=1, output_nc=1)
+    input = torch.rand(1, 2, 96, 320, 320)
+    print(generator(input).shape)
+    start_time = time.time()
+    flops, params = profile(generator, inputs=(input, ))
+    print(f"Total FLOPs: {str(flops/1000**3)}G")
+    print(f"Total Params: {str(params/1000**3)}G")
+    end_time = time.time()
+    print("Time taken to compute FLOPs and Params: ", end_time - start_time)
